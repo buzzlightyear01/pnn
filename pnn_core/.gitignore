@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Data
+data/*
+!data/*.py
+
+datasets/
+cifar-100-python/
+domainnet/
+office_home/
+glue_data/
+*.tar
+*.zip
+
+# Checkpoints
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Experiment outputs
+experiments/**/runs/
+experiments/**/checkpoints/
+logs/
+slurm-*.out
+
+# TensorBoard
+runs/
+*.event*
+
+# OS junk
+.DS_Store
+Thumbs.db
