@@ -4,7 +4,7 @@ import argparse
 import json
 from datetime import datetime
 
-# اطمینان از اینکه ریشه‌ی پروژه (pnn/) در sys.path است
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -41,7 +41,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # config پایه را بخوان
+   
     with open(args.config, "r") as f:
         config = json.load(f)
 
