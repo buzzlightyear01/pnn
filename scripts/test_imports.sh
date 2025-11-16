@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e  # اگر خطا خورد، اسکریپت رو متوقف کن
+set -e 
 
 echo "[TEST] Python & imports"
 
