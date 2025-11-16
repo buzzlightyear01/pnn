@@ -15,7 +15,7 @@ def get_task_class_splits(
     num_tasks: int = NUM_TASKS
 ) -> List[List[int]]:
    
-    assert num_classes % num_tasks == 0, "num_classes باید مضربی از num_tasks باشد."
+    assert num_classes % num_tasks == 0, "num_classes must be a multiple of num_tasks."
     classes_per_task = num_classes // num_tasks
     task_classes: List[List[int]] = []
     for t in range(num_tasks):
