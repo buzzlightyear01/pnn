@@ -5,21 +5,15 @@ import json
 import torch
 import torch.nn as nn
 
-CURRENT_DIR = os.path.dirname(__file__)
-PNN_CORE_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
-
-import sys
-if PNN_CORE_ROOT not in sys.path:
-    sys.path.insert(0, PNN_CORE_ROOT)
-
-from data.cifar100_cil import get_cifar100_cil_dataloaders
-from models.resnet18 import build_resnet18
-from utils.logging import ExperimentLogger
-from utils.seed import set_seed
-from training.eval_metrics import compute_metrics
+from pnn_core.data.cifar100_cil import get_cifar100_cil_dataloaders
+from pnn_core.models.resnet18 import build_resnet18
+from pnn_core.utils.logging import ExperimentLogger
+from pnn_core.utils.seed import set_seed
+from pnn_core.training.eval_metrics import compute_metrics
 
 
 def _evaluate(model: nn.Module, loader, device: torch.device) -> float:
+    """ارزیابی ساده روی یک DataLoader (accuracy به درصد)."""
     model.eval()
     correct = 0
     total = 0
@@ -36,6 +30,10 @@ def _evaluate(model: nn.Module, loader, device: torch.device) -> float:
 
 
 def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None:
+    """
+    حلقه‌ی آموزش اصلی برای CIFAR-100 class-incremental.
+    method می‌تواند baseline / pnn_layer / pnn_param باشد.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     method = config["method"]
     seed = config.get("seed", 0)
@@ -44,17 +42,21 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
     logger.log_text(f"Using device: {device}")
     logger.log_text(f"Method: {method}, Seed: {seed}")
 
+    # ---------------- Data ----------------
     train_loaders, test_loaders, task_classes = get_cifar100_cil_dataloaders(
         data_root=config["data_root"],
         batch_size=config["batch_size"],
         num_workers=config.get("num_workers", 2),
     )
-
     num_tasks = len(train_loaders)
     logger.log_text(f"Number of tasks: {num_tasks}")
     logger.log_text(f"Task class splits: {task_classes}")
 
-    model = build_resnet18(num_classes=100, pretrained=config.get("pretrained", False))
+    # ---------------- Model ----------------
+    model = build_resnet18(
+        num_classes=100,
+        pretrained=config.get("pretrained", False),
+    )
     model = model.to(device)
 
     opt_cfg = config["optimizer"]
@@ -66,15 +68,20 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
     )
     criterion = nn.CrossEntropyLoss()
 
+    # ---------------- PNN (اختیاری) ----------------
     stabilizer = None
     linear_warmup = None
     use_pnn = method.startswith("pnn")
+
+    pnn_cfg = config.get("pnn", {})
+    apply_penalty = pnn_cfg.get("apply_penalty", True)
+    reg_clip = pnn_cfg.get("reg_clip", None)
+
     if use_pnn:
         from pnn_core.pnn.stabilizer import PNNStabilizer
         from pnn_core.pnn.schedule import linear_warmup as _linear_warmup
 
         linear_warmup = _linear_warmup
-        pnn_cfg = config["pnn"]
         excluded_params = set()
 
         stabilizer = PNNStabilizer(
@@ -96,12 +103,8 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
     epochs_per_task = config["epochs_per_task"]
     task_accuracies: List[List[float]] = []
 
-    max_tasks = config.get("max_tasks", None)
-
+    # ---------------- Main CIL loop ----------------
     for task_id, train_loader in enumerate(train_loaders):
-        if max_tasks is not None and task_id >= max_tasks:
-            break
-
         logger.log_text(f"\n=== Task {task_id} / {num_tasks - 1} ===")
         logger.log_text(f"Classes for this task: {task_classes[task_id]}")
 
@@ -109,7 +112,7 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
             stabilizer.begin_task(reset_importance=True)
 
         task_step = 0
-        warmup_epochs = config["pnn"]["warmup_epochs"] if use_pnn else 0
+        warmup_epochs = pnn_cfg.get("warmup_epochs", 0) if use_pnn else 0
         warmup_steps = warmup_epochs * max(1, len(train_loader)) if use_pnn else 0
 
         for epoch in range(epochs_per_task):
@@ -127,17 +130,20 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
                 reg_loss = torch.tensor(0.0, device=device)
 
                 if stabilizer is not None:
+                    # گرادیان‌ها برای importance
                     named_params = [
-                        (n, p) for n, p in model.named_parameters()
+                        (n, p)
+                        for n, p in model.named_parameters()
                         if p.requires_grad and n not in stabilizer.excluded_params
                     ]
                     if len(named_params) > 0:
                         grads = torch.autograd.grad(
                             task_loss,
                             [p for _, p in named_params],
-                            retain_graph=False,
+                            retain_graph=True,   # مهم
                             allow_unused=True,
                         )
+
                         stabilizer.accumulate_importance_from_grads(
                             list(zip([n for n, _ in named_params], grads))
                         )
@@ -145,11 +151,25 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
                         mu = linear_warmup(
                             task_step,
                             warmup_steps,
-                            config["pnn"]["mu_min"],
-                            config["pnn"]["mu_max"],
+                            pnn_cfg["mu_min"],
+                            pnn_cfg["mu_max"],
                         )
-                        reg_loss = stabilizer.reg_loss(mu)
-                        epoch_reg_loss += reg_loss.item()
+
+                        if apply_penalty:
+                            reg_loss = stabilizer.reg_loss(mu)
+                            # کلیپ کردن مقدار پنالتی برای جلوگیری از انفجار
+                            if reg_clip is not None:
+                                reg_loss = torch.clamp(reg_loss, -reg_clip, reg_clip)
+
+                            if not torch.isfinite(reg_loss):
+                                logger.log_text(
+                                    f"[WARN] reg_loss became {reg_loss.item()} on "
+                                    f"task {task_id}, epoch {epoch}, step {batch_idx}; "
+                                    f"setting reg_loss = 0.0 temporarily."
+                                )
+                                reg_loss = torch.tensor(0.0, device=device)
+
+                            epoch_reg_loss += reg_loss.item()
 
                 total_loss = task_loss + reg_loss
                 total_loss.backward()
@@ -159,11 +179,15 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
                 task_step += 1
 
             avg_loss = epoch_loss / max(1, len(train_loader))
-            avg_reg = epoch_reg_loss / max(1, len(train_loader)) if stabilizer is not None else 0.0
+            avg_reg = (
+                epoch_reg_loss / max(1, len(train_loader))
+                if stabilizer is not None and apply_penalty
+                else 0.0
+            )
             logger.log_text(
                 f"Task {task_id}, Epoch {epoch}: loss={avg_loss:.4f}, reg={avg_reg:.4f}"
             )
-            if stabilizer is not None:
+            if stabilizer is not None and apply_penalty:
                 logger.log_reg_loss(
                     task=task_id,
                     epoch=epoch,
@@ -175,6 +199,7 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
         if stabilizer is not None:
             stabilizer.end_task()
 
+        # ------------- evaluation -------------
         current_task_accs: List[float] = []
         with torch.no_grad():
             for eval_task_id in range(task_id + 1):
@@ -197,6 +222,7 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
             row[k] = acc
         task_accuracies.append(row)
 
+        # ------------- λ stats (برای paper) -------------
         if stabilizer is not None and hasattr(stabilizer, "lambda_"):
             for name, lam in stabilizer.lambda_.items():
                 flat = lam.detach().view(-1)
@@ -215,6 +241,7 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
                     seed=seed,
                 )
 
+    # ------------- summary -------------
     metrics = compute_metrics(task_accuracies)
     summary_path = os.path.join(config["run_dir"], "summary.json")
     with open(summary_path, "w") as f:
