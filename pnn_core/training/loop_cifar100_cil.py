@@ -13,7 +13,6 @@ from pnn_core.training.eval_metrics import compute_metrics
 
 
 def _evaluate(model: nn.Module, loader, device: torch.device) -> float:
-    """ارزیابی ساده روی یک DataLoader (accuracy به درصد)."""
     model.eval()
     correct = 0
     total = 0
@@ -30,10 +29,7 @@ def _evaluate(model: nn.Module, loader, device: torch.device) -> float:
 
 
 def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None:
-    """
-    حلقه‌ی آموزش اصلی برای CIFAR-100 class-incremental.
-    method می‌تواند baseline / pnn_layer / pnn_param باشد.
-    """
+ 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     method = config["method"]
     seed = config.get("seed", 0)
@@ -68,7 +64,7 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
     )
     criterion = nn.CrossEntropyLoss()
 
-    # ---------------- PNN (اختیاری) ----------------
+    # ---------------- PNN (optional) ----------------
     stabilizer = None
     linear_warmup = None
     use_pnn = method.startswith("pnn")
@@ -130,7 +126,6 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
                 reg_loss = torch.tensor(0.0, device=device)
 
                 if stabilizer is not None:
-                    # گرادیان‌ها برای importance
                     named_params = [
                         (n, p)
                         for n, p in model.named_parameters()
@@ -140,7 +135,7 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
                         grads = torch.autograd.grad(
                             task_loss,
                             [p for _, p in named_params],
-                            retain_graph=True,   # مهم
+                            retain_graph=True,   
                             allow_unused=True,
                         )
 
@@ -157,7 +152,7 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
 
                         if apply_penalty:
                             reg_loss = stabilizer.reg_loss(mu)
-                            # کلیپ کردن مقدار پنالتی برای جلوگیری از انفجار
+                        
                             if reg_clip is not None:
                                 reg_loss = torch.clamp(reg_loss, -reg_clip, reg_clip)
 
@@ -222,7 +217,7 @@ def train_cifar100_cil(config: Dict[str, Any], logger: ExperimentLogger) -> None
             row[k] = acc
         task_accuracies.append(row)
 
-        # ------------- λ stats (برای paper) -------------
+        # ------------- λ stats (paper) -------------
         if stabilizer is not None and hasattr(stabilizer, "lambda_"):
             for name, lam in stabilizer.lambda_.items():
                 flat = lam.detach().view(-1)
